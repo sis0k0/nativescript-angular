@@ -1,10 +1,17 @@
 import {
-    Attribute, ComponentFactory, ComponentRef, Directive,
+    Attribute, OnInit, OnDestroy,
+    ChangeDetectorRef,
+    ComponentFactory, ComponentRef, Directive,
     ViewContainerRef, Type, InjectionToken,
     Inject, ComponentFactoryResolver, Injector
 } from "@angular/core";
 import { profile } from "tns-core-modules/profiling";
-import { RouterOutletMap, ActivatedRoute, PRIMARY_OUTLET } from "@angular/router";
+import {
+    /* RouterOutletMap, */
+    ActivatedRoute,
+    ChildrenOutletContexts,
+    PRIMARY_OUTLET,
+} from "@angular/router";
 import { Device } from "tns-core-modules/platform";
 import { Frame } from "tns-core-modules/ui/frame";
 import { Page, NavigatedData } from "tns-core-modules/ui/page";
@@ -20,7 +27,8 @@ import { NSLocationStrategy } from "./ns-location-strategy";
 interface CacheItem {
     componentRef: ComponentRef<any>;
     reusedRoute: PageRoute;
-    outletMap: RouterOutletMap;
+    parentContexts: ChildrenOutletContexts;
+    // outletMap: RouterOutletMap;
     loaderRef?: ComponentRef<any>;
 }
 
@@ -37,12 +45,8 @@ export class PageRoute {
 class RefCache {
     private cache: Array<CacheItem> = new Array<CacheItem>();
 
-    public push(
-        componentRef: ComponentRef<any>,
-        reusedRoute: PageRoute,
-        outletMap: RouterOutletMap,
-        loaderRef: ComponentRef<any>) {
-        this.cache.push({ componentRef, reusedRoute, outletMap, loaderRef });
+    public push(cacheItem: CacheItem) {
+        this.cache.push(cacheItem);
     }
 
     public pop(): CacheItem {
@@ -59,16 +63,17 @@ class RefCache {
 }
 
 @Directive({ selector: "page-router-outlet" }) // tslint:disable-line:directive-selector
-export class PageRouterOutlet { // tslint:disable-line:directive-class-suffix
+export class PageRouterOutlet implements OnDestroy, OnInit { // tslint:disable-line:directive-class-suffix
+    private activated: ComponentRef<any>|null = null;
+    private _activatedRoute: ActivatedRoute|null = null;
+    private name: string;
+
     private viewUtil: ViewUtil;
     private refCache: RefCache = new RefCache();
     private isInitialPage: boolean = true;
     private detachedLoaderFactory: ComponentFactory<DetachedLoader>;
 
-    private currentActivatedComp: ComponentRef<any>;
-    private currentActivatedRoute: ActivatedRoute;
-
-    public outletMap: RouterOutletMap;
+    // public outletMap: RouterOutletMap;
 
     /** @deprecated from Angular since v4 */
     get locationInjector(): Injector { return this.location.injector; }
@@ -76,40 +81,65 @@ export class PageRouterOutlet { // tslint:disable-line:directive-class-suffix
     get locationFactoryResolver(): ComponentFactoryResolver { return this.resolver; }
 
     get isActivated(): boolean {
-        return !!this.currentActivatedComp;
+        return !!this.activated;
     }
 
     get component(): Object {
-        if (!this.currentActivatedComp) {
+        if (!this.activated) {
             throw new Error("Outlet is not activated");
         }
 
-        return this.currentActivatedComp.instance;
+        return this.activated.instance;
     }
     get activatedRoute(): ActivatedRoute {
-        if (!this.currentActivatedComp) {
+        if (!this.activated) {
             throw new Error("Outlet is not activated");
         }
 
-        return this.currentActivatedRoute;
+        return this._activatedRoute;
     }
 
     constructor(
-        parentOutletMap: RouterOutletMap,
+        // parentOutletMap: RouterOutletMap,
+        private parentContexts: ChildrenOutletContexts,
         private location: ViewContainerRef,
         @Attribute("name") name: string,
         private locationStrategy: NSLocationStrategy,
         private componentFactoryResolver: ComponentFactoryResolver,
         private resolver: ComponentFactoryResolver,
         private frame: Frame,
+        private changeDetector: ChangeDetectorRef,
         @Inject(DEVICE) device: Device,
         @Inject(PAGE_FACTORY) private pageFactory: PageFactory) {
 
-        parentOutletMap.registerOutlet(name ? name : PRIMARY_OUTLET, <any>this);
+        this.name = name || PRIMARY_OUTLET;
+        parentContexts.onChildOutletCreated(this.name, <any>this);
+        // parentOutletMap.registerOutlet(name ? name : PRIMARY_OUTLET, <any>this);
 
         this.viewUtil = new ViewUtil(device);
         this.detachedLoaderFactory = resolver.resolveComponentFactory(DetachedLoader);
         log("DetachedLoaderFactory loaded");
+    }
+
+    ngOnDestroy(): void {
+        this.parentContexts.onChildOutletDestroyed(this.name);
+    }
+
+    ngOnInit(): void {
+        if (!this.activated) {
+            // If the outlet was not instantiated at the time the route got activated we need to populate
+            // the outlet when it is initialized (ie inside a NgIf)
+            const context = this.parentContexts.getContext(this.name);
+            if (context && context.route) {
+                if (context.attachRef) {
+                    // `attachRef` is populated when there is an existing component to mount
+                    this.attach(context.attachRef, context.route);
+                } else {
+                    // otherwise the component defined in the configuration is created
+                    this.activateWith(context.route, context.resolver || null);
+                }
+            }
+        }
     }
 
     deactivate(): void {
@@ -118,12 +148,12 @@ export class PageRouterOutlet { // tslint:disable-line:directive-class-suffix
             const poppedItem = this.refCache.pop();
             const poppedRef = poppedItem.componentRef;
 
-            if (this.currentActivatedComp !== poppedRef) {
+            if (this.activated !== poppedRef) {
                 throw new Error("Current componentRef is different for cached componentRef");
             }
 
             this.destroyCacheItem(poppedItem);
-            this.currentActivatedComp = null;
+            this.activated = null;
 
         } else {
             log("PageRouterOutlet.deactivate() while going forward - do nothing");
@@ -146,35 +176,66 @@ export class PageRouterOutlet { // tslint:disable-line:directive-class-suffix
     }
 
     /**
+     * Called when the `RouteReuseStrategy` instructs to detach the subtree
+     */
+    detach(): ComponentRef<any> {
+        if (!this.activated) {
+            throw new Error("Outlet is not activated");
+        }
+
+        this.location.detach();
+        const cmp = this.activated;
+        this.activated = null;
+        this._activatedRoute = null;
+        return cmp;
+    }
+
+    /**
+     * Called when the `RouteReuseStrategy` instructs to re-attach a previously detached subtree
+     */
+    attach(ref: ComponentRef<any>, activatedRoute: ActivatedRoute) {
+        this.activated = ref;
+        this._activatedRoute = activatedRoute;
+        this.location.insert(ref.hostView);
+    }
+
+    /**
      * Called by the Router to instantiate a new component during the commit phase of a navigation.
      * This method in turn is responsible for calling the `routerOnActivate` hook of its child.
      */
     @profile
     activateWith(
-        activatedRoute: ActivatedRoute, resolver: ComponentFactoryResolver|null,
-        outletMap: RouterOutletMap): void {
-        this.outletMap = outletMap;
-        this.currentActivatedRoute = activatedRoute;
+        activatedRoute: ActivatedRoute,
+        resolver: ComponentFactoryResolver|null)
+        : void {
 
+        // if (this.isActivated) {
+            // throw new Error("Cannot activate an already activated outlet");
+        // }
+
+        this._activatedRoute = activatedRoute;
         resolver = resolver || this.resolver;
 
         if (this.locationStrategy._isPageNavigatingBack()) {
-            this.activateOnGoBack(activatedRoute, outletMap);
+            this.activateOnGoBack(activatedRoute /*, outletMap */);
         } else {
-            this.activateOnGoForward(activatedRoute, outletMap, resolver);
+            this.activateOnGoForward(activatedRoute, /* outletMap,*/ resolver);
         }
     }
 
     private activateOnGoForward(
         activatedRoute: ActivatedRoute,
-        outletMap: RouterOutletMap,
+        // outletMap: RouterOutletMap,
         loadedResolver: ComponentFactoryResolver): void {
         const pageRoute = new PageRoute(activatedRoute);
 
-        let providers = new Map();
+
+        const childContexts = this.parentContexts.getOrCreateContext(this.name).children;
+        const providers = new Map();
         providers.set(PageRoute, pageRoute);
         providers.set(ActivatedRoute, activatedRoute);
-        providers.set(RouterOutletMap, outletMap);
+        providers.set(ChildrenOutletContexts, childContexts);
+        // providers.set(RouterOutletMap, outletMap);
         const childInjector = new ChildInjector(providers, this.location.injector);
 
         const factory = this.getComponentFactory(activatedRoute, loadedResolver);
@@ -183,12 +244,17 @@ export class PageRouterOutlet { // tslint:disable-line:directive-class-suffix
 
             this.isInitialPage = false;
 
-            this.currentActivatedComp = this.location.createComponent(
+            this.activated = this.location.createComponent(
                 factory, this.location.length, childInjector, []);
-            this.currentActivatedComp.changeDetectorRef.detectChanges();
+            this.changeDetector.markForCheck();
+            // this.activated.changeDetectorRef.detectChanges();
 
-            this.refCache.push(this.currentActivatedComp, pageRoute, outletMap, null);
-
+            this.refCache.push({
+                componentRef: this.activated,
+                reusedRoute: pageRoute,
+                parentContexts: this.parentContexts,
+                loaderRef: null,
+            });
         } else {
             log("PageRouterOutlet.activate() forward navigation - " +
                 "create detached loader in the loader container");
@@ -202,35 +268,45 @@ export class PageRouterOutlet { // tslint:disable-line:directive-class-suffix
 
             const loaderRef = this.location.createComponent(
                 this.detachedLoaderFactory, this.location.length, childInjector, []);
-            loaderRef.changeDetectorRef.detectChanges();
+            this.changeDetector.markForCheck();
+            // loaderRef.changeDetectorRef.detectChanges();
 
-            this.currentActivatedComp = loaderRef.instance.loadWithFactory(factory);
-            this.loadComponentInPage(page, this.currentActivatedComp);
+            this.activated = loaderRef.instance.loadWithFactory(factory);
+            this.loadComponentInPage(page, this.activated);
 
-            this.currentActivatedComp.changeDetectorRef.detectChanges();
-            this.refCache.push(this.currentActivatedComp, pageRoute, outletMap, loaderRef);
+            // this.activated.changeDetectorRef.detectChanges();
+            this.refCache.push({
+                componentRef: this.activated,
+                reusedRoute: pageRoute,
+                parentContexts: this.parentContexts,
+                loaderRef,
+            });
         }
     }
 
     private activateOnGoBack(
-        activatedRoute: ActivatedRoute,
-        outletMap: RouterOutletMap): void {
+        activatedRoute: ActivatedRoute
+        /*outletMap: RouterOutletMap */): void {
         log("PageRouterOutlet.activate() - Back navigation, so load from cache");
 
         this.locationStrategy._finishBackPageNavigation();
 
-        let cacheItem = this.refCache.peek();
+        const cacheItem = this.refCache.peek();
         cacheItem.reusedRoute.activatedRoute.next(activatedRoute);
 
-        this.outletMap = cacheItem.outletMap;
+        this.parentContexts = cacheItem.parentContexts;
+
+        // this.outletMap = cacheItem.outletMap;
 
         // HACK: Fill the outlet map provided by the router, with the outlets that we have
         // cached. This is needed because the component is taken from the cache and not
         // created - so it will not register its child router-outlets to the newly created
         // outlet map.
-        (<any>Object).assign(outletMap, cacheItem.outletMap);
+        // (<any>Object).assign(outletMap, cacheItem.outletMap);
 
-        this.currentActivatedComp = cacheItem.componentRef;
+        Object.assign(this.parentContexts, cacheItem.parentContexts);
+
+        this.activated = cacheItem.componentRef;
     }
 
     @profile
