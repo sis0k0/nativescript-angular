@@ -18,6 +18,7 @@ import {
     TemplateRef,
     ViewChild,
     ViewContainerRef,
+    ɵisListLikeIterable as isListLikeIterable,
 } from "@angular/core";
 import { ListView, ItemEventData } from "tns-core-modules/ui/list-view";
 import { View, KeyedTemplate } from "tns-core-modules/ui/core/view";
@@ -26,7 +27,6 @@ import { LayoutBase } from "tns-core-modules/ui/layouts/layout-base";
 import { profile } from "tns-core-modules/profiling";
 
 import { CommentNode } from "../element-registry";
-import { isListLikeIterable } from "../collection-facade";
 import { listViewLog, listViewError } from "../trace";
 
 const NG_VIEW = "_ngViewRef";
