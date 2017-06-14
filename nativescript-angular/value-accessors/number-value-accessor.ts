@@ -34,6 +34,7 @@ export class NumberValueAccessor extends BaseValueAccessor<Slider> { // tslint:d
     }
 
     writeValue(value: any): void {
-        this.view.value = value;
+        const normalized = super.normalizeValue(value);
+        this.view.value = normalized;
     }
 }

@@ -23,7 +23,7 @@ const TIME_VALUE_ACCESSOR = {
         "TimePicker[ngModel],TimePicker[formControlName]," +
         "timepicker[ngModel],timepicker[formControlName]," +
         "timePicker[ngModel],timePicker[formControlName]," +
-        "time-picker[ngModel], time-picker[formControlName]",
+        "time-picker[ngModel],time-picker[formControlName]",
     providers: [TIME_VALUE_ACCESSOR],
     host: {
         "(touch)": "onTouched()",
@@ -36,6 +36,7 @@ export class TimeValueAccessor extends BaseValueAccessor<TimePicker> { // tslint
     }
 
     writeValue(value: any): void {
-        this.view.time = value;
+        const normalized = super.normalizeValue(value);
+        this.view.time = normalized;
     }
 }
