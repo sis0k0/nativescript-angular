@@ -9,8 +9,7 @@ import { LayoutBase } from "ui/layouts/layout-base";
 import { StackLayout } from "ui/layouts/stack-layout";
 import { ContentView } from "ui/content-view";
 import { Button } from "ui/button";
-import { NgView } from "nativescript-angular/element-types";
-import { registerElement } from "nativescript-angular/element-registry";
+import { NgView, registerElement } from "nativescript-angular/element-registry";
 import * as button from "tns-core-modules/ui/button";
 import * as view from "tns-core-modules/ui/core/view";
 
